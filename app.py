@@ -1,143 +1,82 @@
-from flask import Flask, render_template, request, jsonify
-import mysql.connector
+from flask import Flask,render_template,request,redirect,url_for,jsonify,send_from_directory
+import os
 from datetime import datetime
+from models import DBManager
 
 app = Flask(__name__)
+#app.config['UPLOAD_FOLDER'] = 'static/uploads'
+app.config['UPLOAD_FOLDER'] = os.path.join(app.root_path, 'static', 'uploads')
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# MySQL 연결 설정
-db_config = {
-    'host': 'localhost',
-    'user': 'sejong',
-    'password': '1234',
-    'database': 'todo_db'
-}
+manager = DBManager()
 
-# 데이터베이스 연결 함수
-def get_db_connection():
-    return mysql.connector.connect(**db_config)
-
-# 테이블 생성 쿼리 (due_date 필드 추가)
-create_table_query = """
-CREATE TABLE IF NOT EXISTS todos (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    title VARCHAR(200) NOT NULL,
-    completed BOOLEAN DEFAULT FALSE,
-    due_date DATE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)
-"""
-
-# 테이블 생성
-try:
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(create_table_query)
-    conn.commit()
-except Exception as e:
-    print(f"Error creating table: {e}")
-finally:
-    cursor.close()
-    conn.close()
-
+# 목록보기
 @app.route('/')
 def index():
-    return render_template('index.html')
+    posts = manager.get_all_posts()
+    return render_template('index.html',posts=posts)
 
-# CREATE - 할일 추가
-@app.route('/api/todos', methods=['POST'])
-def add_todo():
-    title = request.json.get('title')
-    due_date = request.json.get('due_date')
-    
-    if not title:
-        return jsonify({'error': '제목은 필수입니다'}), 400
-    
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO todos (title, due_date) VALUES (%s, %s)", (title, due_date))
-        conn.commit()
-        todo_id = cursor.lastrowid
-        
-        return jsonify({
-            'id': todo_id,
-            'title': title,
-            'completed': False,
-            'due_date': due_date,
-            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        }), 201
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    finally:
-        cursor.close()
-        conn.close()
+# 내용보기
+@app.route('/post/<int:id>')
+def view_post(id):
+    post = manager.get_post_by_id(id)
+    return render_template('view.html',post=post)
 
-# READ - 할일 목록 조회
-@app.route('/api/todos', methods=['GET'])
-def get_todos():
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT *, DATE_FORMAT(due_date, '%Y-%m-%d') as due_date_formatted FROM todos ORDER BY due_date ASC, created_at DESC")
-        todos = cursor.fetchall()
-        return jsonify(todos)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    finally:
-        cursor.close()
-        conn.close()
-
-# UPDATE - 할일 상태 변경
-@app.route('/api/todos/<int:todo_id>', methods=['PUT'])
-def update_todo(todo_id):
-    completed = request.json.get('completed')
-    title = request.json.get('title')
-    due_date = request.json.get('due_date')
-    
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+# 내용추가
+# 파일업로드: enctype="multipart/form-data", method='POST', type='file', accept=".png,.jpg,.gif" 
+@app.route('/post/add', methods=['GET', 'POST'])
+def add_post():
+    if request.method == 'POST':
+        title = request.form['title']
+        content = request.form['content']
         
-        update_fields = []
-        update_values = []
+        # 첨부파일 한 개
+        file = request.files['file']
+        filename = file.filename if file else None
         
-        if title is not None:
-            update_fields.append("title = %s")
-            update_values.append(title)
-        if completed is not None:
-            update_fields.append("completed = %s")
-            update_values.append(completed)
-        if due_date is not None:
-            update_fields.append("due_date = %s")
-            update_values.append(due_date)
+        if filename:
+            file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
             
-        if update_fields:
-            query = "UPDATE todos SET " + ", ".join(update_fields) + " WHERE id = %s"
-            update_values.append(todo_id)
-            cursor.execute(query, tuple(update_values))
-            conn.commit()
+        # 첨부파일 여러 개 (multiple 속성)
+        # files = request.files.getlist('files')
+        # saved_files = []
+        # for file in files:
+        #     if file and file.filename != '':
+        #         filename = file.filename
+        #         file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+        #         saved_files.append(filename)
         
-        return jsonify({'message': '업데이트 성공'}), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    finally:
-        cursor.close()
-        conn.close()
+        # filename = ",".join(saved_files)
+        
+        if manager.insert_post(title,content,filename):
+            return redirect("/")
+        return "게시글 추가 실패", 400        
+    return render_template('add.html')
 
-# DELETE - 할일 삭제
-@app.route('/api/todos/<int:todo_id>', methods=['DELETE'])
-def delete_todo(todo_id):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM todos WHERE id = %s", (todo_id,))
-        conn.commit()
-        return jsonify({'message': '삭제 성공'}), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    finally:
-        cursor.close()
-        conn.close()
+
+@app.route('/post/edit/<int:id>', methods=['GET', 'POST'])
+def edit_post(id):
+    post = manager.get_post_by_id(id)
+    if request.method == 'POST':
+        title = request.form['title']
+        content = request.form['content']
+        
+        file = request.files['file']
+        filename = file.filename if file else None
+        
+        if filename:
+            file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+        
+        if manager.update_post(id,title,content,filename):
+            return redirect("/")
+        return "게시글 추가 실패", 400        
+    return render_template('edit.html',post=post)
+
+@app.route('/post/delete/<int:id>')
+def delete_post(id):
+    if manager.delete_post(id):
+        return redirect(url_for('index'))
+    return "게시글 삭제 실패", 400
 
 if __name__ == '__main__':
-    app.run(host="0.0.0.0",port=5002,debug=True)
+    app.run(host="0.0.0.0",port=5005,debug=True)
